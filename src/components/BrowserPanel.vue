@@ -6,10 +6,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 /**
  * 工具栏固定高度（逻辑 px），与 Rust 端 CHROME_HEIGHT 常量一致。
- * 单行布局实际内容只占顶部 ~44px，底部留有安全余量，
- * 即使原生分割边界有几像素偏差也不会切到控件。
+ * 单行布局实际内容只占顶部 ~46px，底部留有较大安全余量，
+ * 即使原生分割边界有偏差也不会切到控件。
  */
-const CHROME_HEIGHT = 60;
+const CHROME_HEIGHT = 80;
 
 const props = defineProps<{
   title: string;
@@ -168,11 +168,6 @@ watch(
   -->
   <header class="browser-chrome">
     <div class="chrome-row">
-      <div class="panel-title-chip" :title="hint || title">
-        <Icon icon="lucide:shield-check" style="font-size: 13px" />
-        <span>{{ title }}</span>
-      </div>
-
       <div class="btn-group">
         <button class="nav-btn" type="button" title="后退 (⌘[)" @click="navBack">
           <Icon icon="lucide:arrow-left" style="font-size: 14px" />
@@ -236,7 +231,7 @@ watch(
 .browser-chrome {
   /* 固定高度 + 固定定位 + 裁剪溢出：保证渲染高度永远等于 CHROME_HEIGHT。
      内容单行只占顶部 ~44px，底部余量作为安全区，防止边界偏差切到控件。 */
-  --chrome-height: 60px;
+  --chrome-height: 80px;
   position: fixed;
   top: 0;
   left: 0;
@@ -246,7 +241,7 @@ watch(
   overflow: hidden;
   z-index: 10;
 
-  padding: 6px 12px 0;
+  padding: 8px 12px 0;
   background: #ffffff;
   border-bottom: 1px solid #ececf0;
 }
@@ -258,21 +253,6 @@ watch(
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.panel-title-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 999px;
-  background: #f4f4f5;
-  color: #18181b;
-  font-size: 11.5px;
-  font-weight: 600;
-  flex-shrink: 0;
-  white-space: nowrap;
 }
 
 .btn-group {

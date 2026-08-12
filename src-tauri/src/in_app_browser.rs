@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
 use tauri::{
@@ -23,7 +24,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// 与前端 BrowserPanel.vue 的 CHROME_HEIGHT / --chrome-height 保持一致。
 /// 后端强制使用该常量分割主 WebView 与内容 WebView，
 /// 前端传入的任何高度都会被忽略，避免旧代码/测量值造成遮挡。
-const CHROME_HEIGHT: f64 = 60.0;
+const CHROME_HEIGHT: f64 = 80.0;
 
 /// 兼容旧前端仍传 bounds 的情况（内容一律忽略）
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +50,19 @@ static ACTIVE: std::sync::LazyLock<Mutex<Option<ActiveBrowser>>> =
 
 static RESIZE_HOOKED: std::sync::LazyLock<Mutex<bool>> =
     std::sync::LazyLock::new(|| Mutex::new(false));
+
+/// resize 防抖序号：只有最后一次 Resized 事件对应的延迟任务才执行重排
+static RESIZE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 按当前状态重排：浏览器打开时分割布局，否则恢复主 WebView 全屏
+fn apply_layout(app: &AppHandle) {
+    let active = ACTIVE.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    if active {
+        let _ = layout_split(app);
+    } else {
+        let _ = restore_main_webview(app);
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,12 +141,18 @@ fn ensure_resize_hook(app: &AppHandle) {
         if !matches!(event, WindowEvent::Resized(_)) {
             return;
         }
-        let active = ACTIVE.lock().ok().map(|g| g.is_some()).unwrap_or(false);
-        if active {
-            let _ = layout_split(&app_handle);
-        } else {
-            let _ = restore_main_webview(&app_handle);
-        }
+        // 立即重排一次，随后做防抖兜底：拖拽调整大小期间，系统 autoresizing、
+        // Tauri 内部调整与本钩子会竞争子 WebView 的位置，最终顺序无保证。
+        // 延迟后仅让"最后一次"事件再执行一遍 layout，确保我们的布局最终落地。
+        apply_layout(&app_handle);
+        let seq = RESIZE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+        let handle = app_handle.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(140));
+            if RESIZE_SEQ.load(Ordering::SeqCst) == seq {
+                apply_layout(&handle);
+            }
+        });
     });
     *hooked = true;
 }
