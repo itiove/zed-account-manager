@@ -1,5 +1,6 @@
 mod accounts;
 mod commands;
+mod fingerprint;
 mod in_app_browser;
 mod keychain;
 mod oauth;

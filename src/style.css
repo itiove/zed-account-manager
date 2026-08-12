@@ -705,7 +705,16 @@ button.danger:hover:not(:disabled) {
   padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
-  margin-left: 4px;
+  margin-left: 2px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--blue);
+  border: 1px solid var(--blue-border);
+}
+
+.actions .switch-btn:hover:not(:disabled) {
+  background: var(--blue-light);
+  border-color: var(--blue);
 }
 
 /* ── 第二行：额度进度条 ── */

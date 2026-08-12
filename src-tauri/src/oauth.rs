@@ -138,8 +138,9 @@ pub fn start_login(_app: &AppHandle) -> Result<PendingLogin, String> {
             if let Some(err) = query.error.filter(|e| !e.is_empty()) {
                 *state.result.lock().unwrap() = Some(Err(format!("授权失败: {err}")));
                 let _ = request.respond(html_response(
+                    false,
                     "授权失败",
-                    "<h2>授权失败</h2><p>可返回应用重试。</p>",
+                    "授权过程被中断或拒绝，请返回应用重试。",
                 ));
                 return;
             }
@@ -160,13 +161,15 @@ pub fn start_login(_app: &AppHandle) -> Result<PendingLogin, String> {
                 Ok((user_id, access_token))
             })();
 
-            let body = if outcome.is_ok() {
-                "<h2 style='color:#4ade80'>登录完成</h2>\
-                 <p>正在保存会话，请稍候…</p>"
+            let _ = request.respond(if outcome.is_ok() {
+                html_response(
+                    true,
+                    "授权成功",
+                    "正在保存会话并同步账号信息，返回应用即可。",
+                )
             } else {
-                "<h2>登录处理失败</h2><p>请返回应用重试。</p>"
-            };
-            let _ = request.respond(html_response("登录结果", body));
+                html_response(false, "登录处理失败", "凭据解密失败，请返回应用重试。")
+            });
             *state.result.lock().unwrap() = Some(outcome);
             return;
         }
@@ -179,12 +182,89 @@ pub fn start_login(_app: &AppHandle) -> Result<PendingLogin, String> {
     })
 }
 
-fn html_response(title: &str, body_inner: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{title}</title>\
-         <body style='font-family:system-ui;padding:40px;background:#17181c;color:#e6e6e6'>\
-         {body_inner}</body>"
-    );
+/// 回调结果页模板：与应用一致的浅色卡片风格（shadcn light）。
+const CALLBACK_PAGE_TEMPLATE: &str = r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ · Zed 账号管理</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: #f8fafc;
+    color: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: min(360px, calc(100vw - 48px));
+    padding: 36px 32px 30px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.10);
+    text-align: center;
+    animation: pop 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .icon {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+  }
+  .icon.ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #16a34a; }
+  .icon.err { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
+  .icon svg { width: 26px; height: 26px; }
+  .icon.ok .stroke {
+    stroke-dasharray: 48;
+    stroke-dashoffset: 48;
+    animation: draw 0.5s 0.15s cubic-bezier(0.65, 0, 0.45, 1) forwards;
+  }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+  p { margin: 0; font-size: 13.5px; line-height: 1.65; color: #64748b; }
+  .brand {
+    margin-top: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #94a3b8;
+  }
+  .brand-dot { width: 6px; height: 6px; border-radius: 50%; background: #cbd5e1; }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(10px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon __KIND__">__ICON__</div>
+    <h1>__TITLE__</h1>
+    <p>__DESC__</p>
+    <div class="brand"><span class="brand-dot"></span>Zed 账号管理</div>
+  </div>
+</body>
+</html>"#;
+
+const ICON_OK: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path class="stroke" d="M4 12.5l5 5L20 6.5"/></svg>"#;
+const ICON_ERR: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
+
+fn html_response(ok: bool, title: &str, desc: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let html = CALLBACK_PAGE_TEMPLATE
+        .replace("__KIND__", if ok { "ok" } else { "err" })
+        .replace("__ICON__", if ok { ICON_OK } else { ICON_ERR })
+        .replace("__TITLE__", title)
+        .replace("__DESC__", desc);
     tiny_http::Response::from_string(html).with_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
             .unwrap(),

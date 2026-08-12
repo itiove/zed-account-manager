@@ -78,7 +78,19 @@ function dismissToast() {
 
 async function loadAccounts() {
   try {
-    accounts.value = await api.listAccounts();
+    const next = await api.listAccounts();
+    // 保持稳定顺序：已存在的账号沿用当前展示顺序，新账号追加到末尾，
+    // 避免刷新额度（后端会更新 last_used）导致列表重新排列、发生跳动。
+    const prevOrder = accounts.value.map((a) => a.id);
+    next.sort((a, b) => {
+      const ia = prevOrder.indexOf(a.id);
+      const ib = prevOrder.indexOf(b.id);
+      if (ia === -1 && ib === -1) return 0;
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+    accounts.value = next;
   } catch (e) {
     showToast(`加载账号列表失败: ${e}`, true);
   }
@@ -283,6 +295,9 @@ async function handleAddAccount() {
     let elapsed = 0;
     stopPolling();
     activeLoginId = pending.login_id;
+    // 防重入：loginPoll 成功那次内部要抓 cookie / 保存账号，耗时较长，
+    // 期间不能再发起新轮询，否则登录状态被清空后会收到「没有进行中的登录」。
+    let pollInFlight = false;
     pollTimer = setInterval(async () => {
       elapsed += 1500;
       if (elapsed > 5 * 60 * 1000) {
@@ -296,8 +311,12 @@ async function handleAddAccount() {
         showToast("登录超时，请重新点击「添加账号」", true);
         return;
       }
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const result = await api.loginPoll(pending.login_id);
+        // 登录流程已被成功/取消/超时结束，丢弃迟到的结果
+        if (activeLoginId !== pending.login_id) return;
         if (result.status === "success") {
           stopPolling();
           await closeInAppBrowser();
@@ -316,9 +335,12 @@ async function handleAddAccount() {
           showToast(`登录失败: ${result.message}`, true);
         }
       } catch (e) {
+        if (activeLoginId !== pending.login_id) return;
         stopPolling();
         await closeInAppBrowser();
         showToast(String(e), true);
+      } finally {
+        pollInFlight = false;
       }
     }, 1500);
   } catch (e) {

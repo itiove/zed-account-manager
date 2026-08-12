@@ -16,6 +16,7 @@ use tauri::{
 };
 use url::Url;
 
+use crate::fingerprint::Fingerprint;
 use crate::web_session;
 
 pub const CONTENT_LABEL: &str = "in-app-browser";
@@ -247,9 +248,14 @@ pub fn browser_open(
     let store_id = web_session::profile_id_to_store_bytes(&profile_id);
     let profile_dir: PathBuf = web_session::profile_data_dir(&profile_id)?;
 
+    // Per-profile 稳定指纹：同账号一致、不同账号相异，降低多账号关联风控。
+    let fp = Fingerprint::derive(&profile_id);
+
     let builder = WebviewBuilder::new(CONTENT_LABEL, WebviewUrl::External(initial))
         .data_store_identifier(store_id)
         .data_directory(profile_dir)
+        .user_agent(&fp.user_agent)
+        .initialization_script(&fp.init_script())
         .on_page_load(move |webview, payload| {
             if !matches!(payload.event(), PageLoadEvent::Finished) {
                 return;
