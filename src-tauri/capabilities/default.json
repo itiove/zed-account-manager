@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口 + 内嵌内容 WebView",
+  "windows": ["main", "in-app-browser"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:webview:allow-create-webview",
+    "core:webview:allow-create-webview-window",
+    "opener:default",
+    "opener:allow-open-url"
+  ]
+}
