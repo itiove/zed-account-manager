@@ -37,9 +37,12 @@ pub fn list_accounts() -> Vec<accounts::AccountSummary> {
 }
 
 /// 开始 OAuth：只返回授权 URL + 隔离 profile，不弹新窗口。
+/// RSA 密钥生成较慢，放到阻塞线程池，避免冻结主线程 UI。
 #[tauri::command]
-pub fn login_start(app: AppHandle) -> Result<PendingLoginDto, String> {
-    let pending = oauth::start_login(&app)?;
+pub async fn login_start(app: AppHandle) -> Result<PendingLoginDto, String> {
+    let pending = tauri::async_runtime::spawn_blocking(move || oauth::start_login(&app))
+        .await
+        .map_err(|e| format!("启动登录任务失败: {e}"))??;
     Ok(PendingLoginDto {
         login_id: pending.login_id,
         verification_uri: pending.verification_uri,
@@ -59,11 +62,18 @@ pub async fn login_poll(app: AppHandle, login_id: String) -> LoginPollResult {
         Ok(Some((user_id, access_token))) => {
             match oauth::finalize_login(&app, &login_id, user_id, access_token).await {
                 Ok(result) => {
-                    match accounts::upsert_account_from_credentials(
-                        &result.user_id,
-                        &result.access_token,
-                        result.web_session,
-                    ) {
+                    // upsert 内部有多个阻塞 HTTP 请求，放到阻塞线程池执行。
+                    let upsert = tauri::async_runtime::spawn_blocking(move || {
+                        accounts::upsert_account_from_credentials(
+                            &result.user_id,
+                            &result.access_token,
+                            result.web_session,
+                        )
+                    })
+                    .await
+                    .map_err(|e| format!("保存账号任务失败: {e}"))
+                    .and_then(|r| r);
+                    match upsert {
                         Ok(account) => LoginPollResult::Success {
                             account: accounts::to_summary(&account, None),
                         },
@@ -82,49 +92,61 @@ pub async fn login_poll(app: AppHandle, login_id: String) -> LoginPollResult {
     }
 }
 
+/// 切换账号：写 Keychain + 重启 Zed 进程，均为阻塞操作，放线程池执行。
 #[tauri::command]
-pub fn switch_account(account_id: String) -> Result<accounts::AccountSummary, String> {
-    let account = accounts::switch_to_account(&account_id)?;
-    if let Err(e) = zed_process::restart_to_apply_credentials() {
-        return Err(format!(
-            "已写入 Keychain，但自动重启 Zed 失败（可以手动退出并重新打开 Zed 完成切换）: {e}"
-        ));
-    }
-    Ok(accounts::to_summary(&account, Some(&account_id)))
+pub async fn switch_account(account_id: String) -> Result<accounts::AccountSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let account = accounts::switch_to_account(&account_id)?;
+        if let Err(e) = zed_process::restart_to_apply_credentials() {
+            return Err(format!(
+                "已写入 Keychain，但自动重启 Zed 失败（可以手动退出并重新打开 Zed 完成切换）: {e}"
+            ));
+        }
+        Ok(accounts::to_summary(&account, Some(&account_id)))
+    })
+    .await
+    .map_err(|e| format!("切换任务失败: {e}"))?
 }
 
+/// 刷新额度：内部是多个阻塞 HTTP 请求，放线程池执行避免冻结 UI。
 #[tauri::command]
-pub fn refresh_quota(account_id: Option<String>) -> Result<Vec<accounts::AccountSummary>, String> {
-    let current = accounts::current_account_id();
-    match account_id {
-        Some(id) => {
-            let account = accounts::refresh_account(&id)?;
-            Ok(vec![accounts::to_summary(&account, current.as_deref())])
-        }
-        None => {
-            let results = accounts::refresh_all_accounts();
-            let mut summaries = Vec::new();
-            let mut first_error: Option<String> = None;
-            for result in results {
-                match result {
-                    Ok(account) => {
-                        summaries.push(accounts::to_summary(&account, current.as_deref()))
-                    }
-                    Err(e) => {
-                        if first_error.is_none() {
-                            first_error = Some(e);
+pub async fn refresh_quota(
+    account_id: Option<String>,
+) -> Result<Vec<accounts::AccountSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = accounts::current_account_id();
+        match account_id {
+            Some(id) => {
+                let account = accounts::refresh_account(&id)?;
+                Ok(vec![accounts::to_summary(&account, current.as_deref())])
+            }
+            None => {
+                let results = accounts::refresh_all_accounts();
+                let mut summaries = Vec::new();
+                let mut first_error: Option<String> = None;
+                for result in results {
+                    match result {
+                        Ok(account) => {
+                            summaries.push(accounts::to_summary(&account, current.as_deref()))
+                        }
+                        Err(e) => {
+                            if first_error.is_none() {
+                                first_error = Some(e);
+                            }
                         }
                     }
                 }
-            }
-            if summaries.is_empty() {
-                if let Some(e) = first_error {
-                    return Err(e);
+                if summaries.is_empty() {
+                    if let Some(e) = first_error {
+                        return Err(e);
+                    }
                 }
+                Ok(summaries)
             }
-            Ok(summaries)
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("刷新任务失败: {e}"))?
 }
 
 /// 返回账号对应的 web profile（前端再 browser_open）。

@@ -9,6 +9,11 @@ export interface Credentials {
   secret: string;
 }
 
+const props = defineProps<{
+  /** 确认后父组件正在初始化登录环境，期间锁定对话框 */
+  submitting?: boolean;
+}>();
+
 const emit = defineEmits<{
   (e: "confirm", creds: Credentials): void;
   (e: "cancel"): void;
@@ -21,7 +26,24 @@ const bulk = ref("");
 const showPassword = ref(false);
 const bulkRef = ref<HTMLTextAreaElement | null>(null);
 
-/** 把一段文本按「账号 / 密码 / 2FA 密钥」智能拆分并回填三个输入框 */
+/** 形如 2026-07-10 / 2026/7/10 的日期段（导出数据常见的注册日期，直接忽略） */
+function isDateLike(token: string): boolean {
+  return /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(token);
+}
+
+/** 严格 Base32 判定：全大写 A-Z2-7 且长度 >= 16，用于从多段中挑出 2FA 密钥 */
+function isStrictTotpSecret(token: string): boolean {
+  const clean = token.replace(/=+$/, "");
+  return clean.length >= 16 && /^[A-Z2-7]+$/.test(clean);
+}
+
+/**
+ * 智能拆分一段凭据文本并回填输入框。
+ * 支持常见导出格式，例如：
+ *   `邮箱----密码----用户名----2FA密钥----注册日期`
+ * 规则：邮箱段做账号，其后第一段做密码，Base32 段做 2FA 密钥，
+ * 日期等其余段忽略。
+ */
 function parseBulk(text: string) {
   const normalized = text
     .replace(/[|,;\t]/g, "\n")
@@ -35,12 +57,33 @@ function parseBulk(text: string) {
   if (tokens.length === 1) {
     tokens = tokens[0].split(/\s+/).filter(Boolean);
   }
+  tokens = tokens.filter((t) => !isDateLike(t));
   if (tokens.length === 0) return;
 
-  username.value = tokens[0] ?? "";
-  password.value = tokens[1] ?? "";
-  // 第三段及之后都并入 2FA 密钥（密钥可能带空格被拆开）
-  secret.value = tokens.slice(2).join("").replace(/\s+/g, "");
+  // 账号：优先取含 @ 的邮箱段，否则取第一段
+  const accountIdx = tokens.findIndex((t) => t.includes("@"));
+  const account = accountIdx >= 0 ? tokens[accountIdx] : tokens[0];
+  const rest = tokens.filter((_, i) => i !== (accountIdx >= 0 ? accountIdx : 0));
+
+  // 2FA 密钥：从剩余段中挑出严格 Base32 段（避免误把用户名/密码当密钥）
+  const secretIdx = rest.findIndex(isStrictTotpSecret);
+  const secretToken = secretIdx >= 0 ? rest[secretIdx] : "";
+  const restNoSecret = rest.filter((_, i) => i !== secretIdx || secretIdx < 0);
+
+  // 密码：账号之后的第一段（跳过密钥/日期后剩下的首段）
+  const passwordToken = restNoSecret[0] ?? "";
+
+  username.value = account;
+  password.value = passwordToken;
+  if (secretToken) {
+    secret.value = secretToken.replace(/\s+/g, "");
+  } else if (restNoSecret.length >= 2) {
+    // 兜底：老格式「账号 密码 密钥(可能被空格拆开)」
+    const joined = restNoSecret.slice(1).join("").replace(/\s+/g, "");
+    secret.value = looksLikeTotpSecret(joined) ? joined : "";
+  } else {
+    secret.value = "";
+  }
 }
 
 watch(bulk, (v) => {
@@ -55,7 +98,7 @@ const canConfirm = computed(
 );
 
 function onConfirm() {
-  if (!canConfirm.value) return;
+  if (!canConfirm.value || props.submitting) return;
   emit("confirm", {
     username: username.value.trim(),
     password: password.value.trim(),
@@ -64,6 +107,7 @@ function onConfirm() {
 }
 
 function onCancel() {
+  if (props.submitting) return;
   emit("cancel");
 }
 
@@ -89,7 +133,13 @@ onMounted(async () => {
           <h2>添加 Zed 账号</h2>
           <p>填写登录凭据，稍后会在浏览器底部随时复制</p>
         </div>
-        <button class="cred-x" type="button" title="取消 (Esc)" @click="onCancel">
+        <button
+          class="cred-x"
+          type="button"
+          title="取消 (Esc)"
+          :disabled="submitting"
+          @click="onCancel"
+        >
           <Icon icon="lucide:x" style="font-size: 16px" />
         </button>
       </div>
@@ -105,7 +155,7 @@ onMounted(async () => {
             v-model="bulk"
             rows="3"
             spellcheck="false"
-            placeholder="可直接粘贴一段文本，自动拆分到下面三项。&#10;例如：&#10;user@example.com&#10;MyPassw0rd&#10;JBSWY3DPEHPK3PXP"
+            placeholder="可直接粘贴一段文本，自动识别账号"
           />
         </label>
 
@@ -172,15 +222,28 @@ onMounted(async () => {
       </div>
 
       <div class="cred-foot">
-        <button class="cred-btn ghost" type="button" @click="onCancel">取消</button>
+        <button
+          class="cred-btn ghost"
+          type="button"
+          :disabled="submitting"
+          @click="onCancel"
+        >
+          取消
+        </button>
         <button
           class="cred-btn primary"
           type="button"
-          :disabled="!canConfirm"
+          :disabled="!canConfirm || submitting"
           @click="onConfirm"
         >
-          确定并打开登录页
-          <span class="cred-kbd">⌘↵</span>
+          <Icon
+            v-if="submitting"
+            icon="lucide:loader-2"
+            class="cred-spin"
+            style="font-size: 14px"
+          />
+          {{ submitting ? "正在初始化登录环境…" : "确定并打开登录页" }}
+          <span class="cred-kbd" v-if="!submitting">⌘↵</span>
         </button>
       </div>
     </div>
@@ -425,6 +488,19 @@ onMounted(async () => {
   font-size: 11px;
   opacity: 0.7;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cred-spin {
+  animation: cred-spin 0.9s linear infinite;
+}
+
+@keyframes cred-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes cred-fade {

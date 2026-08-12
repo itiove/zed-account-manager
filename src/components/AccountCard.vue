@@ -15,21 +15,27 @@ const emit = defineEmits<{
   (e: "remove", id: string): void;
   (e: "refresh", id: string): void;
   (e: "open-browser", id: string): void;
-  (e: "recapture", id: string): void;
 }>();
 
+/** 主名称：邮箱优先（信息量最大），完整展示不截断 */
 const label = computed(
   () =>
+    props.account.email ||
     props.account.display_name ||
     props.account.github_login ||
     props.account.id,
 );
 
 const subLabel = computed(() => {
-  if (props.account.github_login && props.account.display_name) {
-    return `@${props.account.github_login}`;
+  const parts: string[] = [];
+  if (props.account.github_login) parts.push(`@${props.account.github_login}`);
+  if (
+    props.account.display_name &&
+    props.account.display_name !== label.value
+  ) {
+    parts.push(props.account.display_name);
   }
-  return props.account.id;
+  return parts.join(" · ") || props.account.id;
 });
 
 const initial = computed(() => label.value.charAt(0).toUpperCase());
@@ -37,9 +43,21 @@ const initial = computed(() => label.value.charAt(0).toUpperCase());
 const planBadge = computed(() => {
   const raw = props.account.plan_raw?.trim();
   if (!raw) return "未知套餐";
-  return raw.replace(/^zed_/i, "").toUpperCase();
+  return raw
+    .replace(/^token_based_/i, "")
+    .replace(/^zed_/i, "")
+    .replace(/_/g, " ")
+    .toUpperCase();
 });
 
+/** 套餐分级：pro 系（含 trial）用高级配色，free/未知用灰 */
+const planTier = computed(() => {
+  const raw = (props.account.plan_raw ?? "").toLowerCase();
+  if (raw.includes("pro")) return "pro";
+  return "free";
+});
+
+/* ── 用量进度（cents → $，除以 100） ─────────── */
 const quotaPercent = computed(() => {
   const used = props.account.token_spend_used_cents;
   const limit = props.account.token_spend_limit_cents;
@@ -55,22 +73,28 @@ const quotaTone = computed(() => {
   return "ok";
 });
 
-function formatCents(value: number | null | undefined): string {
+function formatDollar(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   return `$${(value / 100).toFixed(2)}`;
 }
 
-const spendLabel = computed(() => {
-  const used = props.account.token_spend_used_cents;
-  const limit = props.account.token_spend_limit_cents;
-  if (used == null && limit == null) return null;
-  return `${formatCents(used)} / ${formatCents(limit)}`;
-});
+const spendUsed = computed(() =>
+  formatDollar(props.account.token_spend_used_cents),
+);
+const spendLimit = computed(() =>
+  formatDollar(props.account.token_spend_limit_cents),
+);
+const hasSpend = computed(
+  () =>
+    props.account.token_spend_used_cents != null ||
+    props.account.token_spend_limit_cents != null,
+);
 
 function parseLimitText(raw: string | null | undefined): string {
-  if (!raw) return "—";
+  if (!raw) return "∞";
   const trimmed = raw.trim();
-  if (trimmed.toLowerCase().includes("unlimited")) return "无限";
+  if (trimmed.toLowerCase().includes("unlimited") || trimmed === "null")
+    return "∞";
   try {
     const parsed = JSON.parse(trimmed);
     if (typeof parsed === "number") return parsed.toLocaleString();
@@ -108,158 +132,134 @@ const refreshedLabel = computed(() => {
 
 <template>
   <article class="account-card" :class="{ 'is-current': account.is_current }">
-    <!-- Top Account Profile Header -->
-    <div class="card-top">
-      <div class="user-identity">
-        <div class="avatar" :class="{ current: account.is_current }">
-          {{ initial }}
-        </div>
-        <div class="account-info">
-          <div class="name-row">
-            <span class="name">{{ label }}</span>
-            <span class="badge-current" v-if="account.is_current">
-              <Icon icon="lucide:check-circle-2" style="font-size: 12px" />
-              当前生效
-            </span>
-          </div>
-          <div class="sub">{{ subLabel }}</div>
-        </div>
+    <!-- 第一行：身份 + 操作 -->
+    <div class="card-row">
+      <div class="avatar" :class="{ current: account.is_current }">
+        <img
+          v-if="account.avatar_url"
+          :src="account.avatar_url"
+          :alt="label"
+          loading="lazy"
+        />
+        <template v-else>{{ initial }}</template>
       </div>
 
-      <div class="meta-badges">
-        <span class="plan-badge">
-          <Icon icon="lucide:zap" style="font-size: 11px; color: var(--amber)" />
+      <div class="account-info">
+        <div class="name-row">
+          <span class="name" :title="label">{{ label }}</span>
+          <span class="badge-current" v-if="account.is_current">
+            <Icon icon="lucide:check" style="font-size: 11px" />
+            当前
+          </span>
+          <span
+            class="session-dot"
+            :class="account.has_web_session ? 'ok' : 'warn'"
+            :title="
+              account.has_web_session
+                ? '已保存 Web 会话，可直接刷新额度'
+                : '尚无 Web 会话，点「网页会话」补登'
+            "
+          />
+        </div>
+        <div class="sub">{{ subLabel }}</div>
+      </div>
+
+      <div class="card-side">
+        <span class="plan-badge" :class="planTier">
+          <Icon
+            v-if="planTier === 'pro'"
+            icon="lucide:crown"
+            style="font-size: 10px"
+          />
           {{ planBadge }}
         </span>
-        <span
-          class="session-pill"
-          :class="account.has_web_session ? 'ok' : 'warn'"
-          :title="
-            account.has_web_session
-              ? '已保存 Web 会话，可用 Dashboard 额度接口'
-              : '尚无 zed.session，可点「网页会话」补登'
-          "
+        <div class="actions">
+        <button
+          class="icon-action"
+          :disabled="busy"
+          title="刷新额度数据"
+          @click="emit('refresh', account.id)"
         >
           <Icon
-            :icon="account.has_web_session ? 'lucide:globe' : 'lucide:shield-alert'"
-            style="font-size: 11px"
+            :icon="isActionTarget && activeAction === 'refresh' ? 'lucide:loader-2' : 'lucide:rotate-cw'"
+            :class="{ 'icon-spin': isActionTarget && activeAction === 'refresh' }"
+            style="font-size: 14px"
           />
-          {{ account.has_web_session ? "Web 会话就绪" : "缺 Web 会话" }}
-        </span>
+        </button>
+        <button
+          class="icon-action"
+          :disabled="busy"
+          :title="account.has_web_session ? '打开该账号独立浏览器' : '打开独立浏览器补登 Dashboard'"
+          @click="emit('open-browser', account.id)"
+        >
+          <Icon
+            :icon="isActionTarget && activeAction === 'browser' ? 'lucide:loader-2' : 'lucide:globe'"
+            :class="{ 'icon-spin': isActionTarget && activeAction === 'browser' }"
+            style="font-size: 14px"
+          />
+        </button>
+        <button
+          class="icon-action danger"
+          :disabled="busy"
+          title="从本地移除（不影响 Zed 当前登录态）"
+          @click="emit('remove', account.id)"
+        >
+          <Icon
+            :icon="isActionTarget && activeAction === 'remove' ? 'lucide:loader-2' : 'lucide:trash-2'"
+            :class="{ 'icon-spin': isActionTarget && activeAction === 'remove' }"
+            style="font-size: 14px"
+          />
+        </button>
+
+        <button
+          class="primary switch-btn"
+          v-if="!account.is_current"
+          :disabled="busy"
+          @click="emit('switch', account.id)"
+        >
+          <Icon
+            :icon="isActionTarget && activeAction === 'switch' ? 'lucide:loader-2' : 'lucide:arrow-right-left'"
+            :class="{ 'icon-spin': isActionTarget && activeAction === 'switch' }"
+            style="font-size: 13px"
+          />
+          {{ isActionTarget && activeAction === 'switch' ? "切换中" : "切换" }}
+        </button>
+        </div>
       </div>
     </div>
 
-    <!-- Compact Quotas Display Bar -->
-    <div class="quota-block" v-if="spendLabel || editLabel">
-      <div class="quota-grid">
-        <div class="quota-item" v-if="spendLabel">
-          <span class="q-label">
-            <Icon icon="lucide:coins" style="font-size: 13px" />
-            Token 花费
-          </span>
-          <span class="q-value">{{ spendLabel }}</span>
-        </div>
-        <div class="quota-item" v-if="editLabel">
-          <span class="q-label">
-            <Icon icon="lucide:wand-2" style="font-size: 13px" />
-            Edit Predictions
-          </span>
-          <span class="q-value">{{ editLabel }}</span>
-        </div>
+    <!-- 第二行：额度进度条 -->
+    <div class="quota-row" v-if="hasSpend">
+      <span class="quota-money">
+        <span class="used">{{ spendUsed }}</span>
+        <span class="sep">/</span>
+        <span class="limit">{{ spendLimit }}</span>
+      </span>
+      <div class="quota-bar" :class="quotaTone">
+        <div
+          class="quota-bar-fill"
+          :style="{ width: (quotaPercent ?? 0) + '%' }"
+        />
       </div>
-
-      <div class="quota-bar" v-if="quotaPercent !== null" :class="quotaTone">
-        <div class="quota-bar-fill" :style="{ width: quotaPercent + '%' }" />
-      </div>
-
-      <div class="quota-hint" v-if="quotaPercent !== null || refreshedLabel">
-        <span>{{ quotaPercent !== null ? `已用额度 ${quotaPercent}%` : "" }}</span>
-        <span v-if="refreshedLabel" class="q-label">
-          <Icon icon="lucide:clock" style="font-size: 11px" />
-          刷新于 {{ refreshedLabel }}
-        </span>
-      </div>
-    </div>
-
-    <div class="quota-empty" v-else>
-      <Icon icon="lucide:info" style="font-size: 13px; margin-right: 4px" />
-      暂无额度数据
-      <span v-if="account.last_quota_error" class="err-hint">
-        · {{ account.last_quota_error }}
+      <span class="quota-pct" :class="quotaTone" v-if="quotaPercent !== null">
+        {{ quotaPercent }}%
+      </span>
+      <span class="quota-meta" v-if="editLabel" title="Edit Predictions 用量">
+        <Icon icon="lucide:wand-2" style="font-size: 11px" />
+        {{ editLabel }}
+      </span>
+      <span class="quota-meta" v-if="refreshedLabel" :title="`额度刷新于 ${refreshedLabel}`">
+        <Icon icon="lucide:clock" style="font-size: 11px" />
+        {{ refreshedLabel }}
       </span>
     </div>
 
-    <!-- Intuitive Action Buttons Toolbar -->
-    <div class="actions">
-      <button
-        class="primary action-switch"
-        v-if="!account.is_current"
-        :disabled="busy"
-        @click="emit('switch', account.id)"
-      >
-        <Icon
-          :icon="isActionTarget && activeAction === 'switch' ? 'lucide:loader-2' : 'lucide:arrow-right-left'"
-          :class="{ 'icon-spin': isActionTarget && activeAction === 'switch' }"
-          style="font-size: 14px"
-        />
-        {{ isActionTarget && activeAction === 'switch' ? "正在切换..." : "切换到此账号" }}
-      </button>
-
-      <button
-        class="outline"
-        :disabled="busy"
-        @click="emit('refresh', account.id)"
-        title="刷新额度数据"
-      >
-        <Icon
-          :icon="isActionTarget && activeAction === 'refresh' ? 'lucide:loader-2' : 'lucide:rotate-cw'"
-          :class="{ 'icon-spin': isActionTarget && activeAction === 'refresh' }"
-          style="font-size: 13px"
-        />
-        {{ isActionTarget && activeAction === 'refresh' ? "刷新中" : "刷新" }}
-      </button>
-
-      <button
-        class="outline"
-        :disabled="busy"
-        :title="account.has_web_session ? '打开该账号独立浏览器' : '打开独立浏览器补登 Dashboard'"
-        @click="emit('open-browser', account.id)"
-      >
-        <Icon
-          :icon="isActionTarget && activeAction === 'browser' ? 'lucide:loader-2' : 'lucide:globe'"
-          :class="{ 'icon-spin': isActionTarget && activeAction === 'browser' }"
-          style="font-size: 13px"
-        />
-        网页会话
-      </button>
-
-      <button
-        class="ghost"
-        :disabled="busy"
-        title="从该账号浏览器抓取 cookie 并刷新额度"
-        @click="emit('recapture', account.id)"
-      >
-        <Icon
-          :icon="isActionTarget && activeAction === 'sync' ? 'lucide:loader-2' : 'lucide:refresh-cw'"
-          :class="{ 'icon-spin': isActionTarget && activeAction === 'sync' }"
-          style="font-size: 13px"
-        />
-        同步
-      </button>
-
-      <button
-        class="danger"
-        :disabled="busy"
-        title="从本地移除（不影响 Zed 当前登录态）"
-        @click="emit('remove', account.id)"
-      >
-        <Icon
-          :icon="isActionTarget && activeAction === 'remove' ? 'lucide:loader-2' : 'lucide:trash-2'"
-          :class="{ 'icon-spin': isActionTarget && activeAction === 'remove' }"
-          style="font-size: 13px"
-        />
-        移除
-      </button>
+    <div class="quota-row empty" v-else>
+      <Icon icon="lucide:info" style="font-size: 12px" />
+      暂无额度数据，点刷新或「同步」获取
+      <span v-if="account.last_quota_error" class="err-hint">
+        · {{ account.last_quota_error }}
+      </span>
     </div>
   </article>
 </template>

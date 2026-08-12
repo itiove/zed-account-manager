@@ -18,6 +18,12 @@ pub struct StoredAccount {
     pub access_token: String,
     pub github_login: Option<String>,
     pub display_name: Option<String>,
+    /// Zed 账号邮箱（来自 /frontend/session）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// GitHub 头像 URL（来自 /frontend/session）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     pub plan_raw: Option<String>,
     pub token_spend_used_cents: Option<i64>,
     pub token_spend_limit_cents: Option<i64>,
@@ -45,6 +51,8 @@ pub struct AccountSummary {
     pub id: String,
     pub github_login: Option<String>,
     pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
     pub plan_raw: Option<String>,
     pub is_current: bool,
     pub token_spend_used_cents: Option<i64>,
@@ -172,6 +180,8 @@ pub fn to_summary(account: &StoredAccount, current_id: Option<&str>) -> AccountS
         id: account.id.clone(),
         github_login: account.github_login.clone(),
         display_name: account.display_name.clone(),
+        email: account.email.clone(),
+        avatar_url: account.avatar_url.clone(),
         plan_raw: account.plan_raw.clone(),
         is_current: current_id == Some(account.id.as_str()),
         token_spend_used_cents: account.token_spend_used_cents,
@@ -290,6 +300,8 @@ pub fn upsert_account_from_credentials(
         access_token: access_token.to_string(),
         github_login: existing.as_ref().and_then(|a| a.github_login.clone()),
         display_name: existing.as_ref().and_then(|a| a.display_name.clone()),
+        email: existing.as_ref().and_then(|a| a.email.clone()),
+        avatar_url: existing.as_ref().and_then(|a| a.avatar_url.clone()),
         plan_raw: existing.as_ref().and_then(|a| a.plan_raw.clone()),
         token_spend_used_cents: existing.as_ref().and_then(|a| a.token_spend_used_cents),
         token_spend_limit_cents: existing.as_ref().and_then(|a| a.token_spend_limit_cents),
@@ -325,9 +337,28 @@ pub fn upsert_account_from_credentials(
         }
     }
 
-    // 再尝试 Web billing 接口（字段更贴近 Dashboard）。
+    // 再尝试 Web 接口（字段更贴近 Dashboard）。
     if let Some(session) = web_session::load_session(&account.id) {
         if web_session::session_has_zed_cookie(&session) {
+            // 个人资料：邮箱 / GitHub 用户名 / 套餐。
+            if let Ok(profile) = web_session::fetch_session_profile(&session) {
+                if profile.email.is_some() {
+                    account.email = profile.email;
+                }
+                if profile.avatar_url.is_some() {
+                    account.avatar_url = profile.avatar_url;
+                }
+                if let Some(login) = profile.github_login.or(profile.username) {
+                    account.github_login = Some(login);
+                }
+                if profile.name.is_some() {
+                    account.display_name = profile.name;
+                }
+                if profile.plan_raw.is_some() {
+                    account.plan_raw = profile.plan_raw;
+                }
+            }
+
             match web_session::fetch_billing_usage(&session) {
                 Ok(usage) => {
                     if let Some(v) = usage.plan_raw {
@@ -387,10 +418,18 @@ pub fn refresh_account(account_id: &str) -> Result<StoredAccount, String> {
     upsert_account_from_credentials(&stored.user_id, &stored.access_token, None)
 }
 
+/// 并行刷新所有账号（每个账号 2~3 个 HTTP 请求，串行会非常慢）。
 pub fn refresh_all_accounts() -> Vec<Result<StoredAccount, String>> {
-    list_accounts()
+    let handles: Vec<_> = list_accounts()
         .into_iter()
-        .map(|account| refresh_account(&account.id))
+        .map(|account| std::thread::spawn(move || refresh_account(&account.id)))
+        .collect();
+    handles
+        .into_iter()
+        .map(|h| {
+            h.join()
+                .unwrap_or_else(|_| Err("刷新线程异常退出".to_string()))
+        })
         .collect()
 }
 

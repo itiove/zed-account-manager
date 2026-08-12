@@ -3,6 +3,8 @@ export interface AccountSummary {
   id: string;
   github_login: string | null;
   display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
   plan_raw: string | null;
   is_current: boolean;
   token_spend_used_cents: number | null;

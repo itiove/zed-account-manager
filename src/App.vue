@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import { api } from "./api";
 import type { AccountSummary } from "./types";
@@ -31,6 +31,8 @@ const envLoadingText = ref("");
 
 /** 添加账号凭据对话框 */
 const credDialogOpen = ref(false);
+/** 凭据确认后的初始化中状态（对话框按钮转圈，避免割裂跳转） */
+const credSubmitting = ref(false);
 /** 传给内嵌浏览器底部栏的凭据（账号/密码/2FA） */
 const browserCredentials = ref<Credentials | null>(null);
 
@@ -40,6 +42,28 @@ let activeLoginId: string | null = null;
 
 const currentAccount = computed(() => accounts.value.find((a) => a.is_current) ?? null);
 const accountCount = computed(() => accounts.value.length);
+
+/** 仅切换/移除/全量刷新才锁住整个列表；单账号刷新/同步只锁自己那张卡 */
+const lockAll = computed(
+  () =>
+    busy.value &&
+    (actionType.value === "switch" ||
+      actionType.value === "remove" ||
+      actionTargetId.value === "all"),
+);
+
+/* ── 账号列表分页 ─────────────────────── */
+const PAGE_SIZE = 5;
+const page = ref(1);
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil(accounts.value.length / PAGE_SIZE)),
+);
+const pagedAccounts = computed(() =>
+  accounts.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
+);
+watch(totalPages, (t) => {
+  if (page.value > t) page.value = t;
+});
 
 function showToast(text: string, isError = false) {
   toast.value = { text, isError };
@@ -98,24 +122,35 @@ async function handleSwitch(accountId: string) {
   }
 }
 
-async function handleRemove(accountId: string) {
-  if (
-    !confirm(
-      "确定从本地移除这个账号？\n会删除独立浏览器会话与 cookie，不影响 Zed 当前登录态。",
-    )
-  ) {
-    return;
-  }
+/** 待确认移除的账号（Tauri WebView 不支持原生 confirm()，用应用内弹窗） */
+const removeTarget = ref<AccountSummary | null>(null);
+const removing = ref(false);
+
+function handleRemove(accountId: string) {
+  removeTarget.value = accounts.value.find((a) => a.id === accountId) ?? null;
+}
+
+function cancelRemove() {
+  if (removing.value) return;
+  removeTarget.value = null;
+}
+
+async function confirmRemove() {
+  const target = removeTarget.value;
+  if (!target || removing.value) return;
+  removing.value = true;
   busy.value = true;
-  actionTargetId.value = accountId;
+  actionTargetId.value = target.id;
   actionType.value = "remove";
   try {
-    await api.removeAccount(accountId);
+    await api.removeAccount(target.id);
     await loadAccounts();
     showToast("已移除账号");
+    removeTarget.value = null;
   } catch (e) {
     showToast(String(e), true);
   } finally {
+    removing.value = false;
     busy.value = false;
     actionTargetId.value = null;
     actionType.value = null;
@@ -186,15 +221,6 @@ async function handleOpenBrowser(accountId: string) {
   }
 }
 
-async function handleRecapture(accountId: string) {
-  if (browserOpen.value && browserAccountId.value === accountId) {
-    await handleBrowserSync();
-    return;
-  }
-  await handleOpenBrowser(accountId);
-  showToast("请在页面中登录后点击「同步会话」");
-}
-
 async function handleBrowserSync() {
   const accountId = browserAccountId.value;
   if (!accountId) {
@@ -224,19 +250,19 @@ function openAddAccountDialog() {
 }
 
 function onCredCancel() {
+  if (credSubmitting.value) return;
   credDialogOpen.value = false;
 }
 
-/** 凭据填写完成：记录凭据并进入登录流程 */
+/** 凭据填写完成：对话框保持打开、按钮进入加载态，初始化完成后平滑切到浏览器 */
 function onCredConfirm(creds: Credentials) {
-  credDialogOpen.value = false;
+  if (credSubmitting.value) return;
   browserCredentials.value = creds;
+  credSubmitting.value = true;
   void handleAddAccount();
 }
 
 async function handleAddAccount() {
-  envLoading.value = true;
-  envLoadingText.value = "正在初始化登录环境…";
   try {
     window.scrollTo(0, 0);
     const pending = await api.loginStart();
@@ -250,7 +276,8 @@ async function handleAddAccount() {
     browserShowSync.value = false;
     browserHint.value =
       "在下方完成 GitHub / Zed 授权。每个账号使用独立会话存储，互不串号。";
-    envLoading.value = false;
+    credSubmitting.value = false;
+    credDialogOpen.value = false;
     browserOpen.value = true;
 
     let elapsed = 0;
@@ -295,7 +322,8 @@ async function handleAddAccount() {
       }
     }, 1500);
   } catch (e) {
-    envLoading.value = false;
+    credSubmitting.value = false;
+    credDialogOpen.value = false;
     showToast(String(e), true);
   }
 }
@@ -361,7 +389,7 @@ onUnmounted(() => {
         <button
           class="primary"
           @click="openAddAccountDialog"
-          :disabled="busy || browserOpen || envLoading || credDialogOpen"
+          :disabled="busy || browserOpen || envLoading || credDialogOpen || credSubmitting"
           title="添加新 Zed 账号"
         >
           <Icon
@@ -407,19 +435,20 @@ onUnmounted(() => {
 
     <!-- Account Cards List -->
     <main class="account-list">
-      <AccountCard
-        v-for="account in accounts"
-        :key="account.id"
-        :account="account"
-        :busy="browserOpen || envLoading || (busy && actionTargetId !== null)"
-        :active-action="actionType"
-        :is-action-target="actionTargetId === account.id"
-        @switch="handleSwitch"
-        @remove="handleRemove"
-        @refresh="handleRefreshOne"
-        @open-browser="handleOpenBrowser"
-        @recapture="handleRecapture"
-      />
+      <TransitionGroup name="card" tag="div" class="card-stack">
+        <AccountCard
+          v-for="account in pagedAccounts"
+          :key="account.id"
+          :account="account"
+          :busy="browserOpen || envLoading || lockAll || (busy && actionTargetId === account.id)"
+          :active-action="actionType"
+          :is-action-target="actionTargetId === account.id"
+          @switch="handleSwitch"
+          @remove="handleRemove"
+          @refresh="handleRefreshOne"
+          @open-browser="handleOpenBrowser"
+        />
+      </TransitionGroup>
 
       <div class="empty-state" v-if="accounts.length === 0 && !browserOpen">
         <div class="empty-icon-box">
@@ -432,6 +461,38 @@ onUnmounted(() => {
         </p>
       </div>
     </main>
+
+    <!-- 分页器：仅在超过一页时显示 -->
+    <nav class="pager" v-if="totalPages > 1">
+      <span class="pager-info">共 {{ accountCount }} 个账号</span>
+      <div class="pager-controls">
+        <button
+          class="pager-btn"
+          :disabled="page <= 1"
+          title="上一页"
+          @click="page -= 1"
+        >
+          <Icon icon="lucide:chevron-left" style="font-size: 15px" />
+        </button>
+        <button
+          v-for="p in totalPages"
+          :key="p"
+          class="pager-num"
+          :class="{ active: p === page }"
+          @click="page = p"
+        >
+          {{ p }}
+        </button>
+        <button
+          class="pager-btn"
+          :disabled="page >= totalPages"
+          title="下一页"
+          @click="page += 1"
+        >
+          <Icon icon="lucide:chevron-right" style="font-size: 15px" />
+        </button>
+      </div>
+    </nav>
 
     <!-- 主窗口内嵌浏览器：主 WebView 缩为工具栏，内容在下方子 WebView -->
     <div class="browser-host" v-if="browserOpen">
@@ -457,9 +518,49 @@ onUnmounted(() => {
     </div>
   </div>
 
+  <!-- 移除账号确认弹窗 -->
+  <Transition name="fade">
+    <div class="confirm-overlay" v-if="removeTarget" @click.self="cancelRemove">
+      <div class="confirm-box" role="alertdialog" aria-modal="true">
+        <div class="confirm-head">
+          <div class="confirm-icon">
+            <Icon icon="lucide:trash-2" style="font-size: 16px" />
+          </div>
+          <div class="confirm-text">
+            <h3>移除账号</h3>
+            <p>删除本地凭据、独立浏览器会话与 cookie，不影响 Zed 当前登录态。</p>
+          </div>
+        </div>
+
+        <div class="confirm-target">
+          <span class="confirm-avatar">
+            {{ (removeTarget.email || removeTarget.display_name || removeTarget.github_login || removeTarget.id).charAt(0).toUpperCase() }}
+          </span>
+          <span class="confirm-name">
+            {{ removeTarget.email || removeTarget.display_name || removeTarget.github_login || removeTarget.id }}
+          </span>
+        </div>
+
+        <div class="confirm-actions">
+          <button class="outline" :disabled="removing" @click="cancelRemove">取消</button>
+          <button class="confirm-danger" :disabled="removing" @click="confirmRemove">
+            <Icon
+              v-if="removing"
+              icon="lucide:loader-2"
+              class="icon-spin"
+              style="font-size: 13px"
+            />
+            {{ removing ? "移除中…" : "确认移除" }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </Transition>
+
   <!-- 添加账号凭据对话框 -->
   <CredentialsDialog
     v-if="credDialogOpen"
+    :submitting="credSubmitting"
     @confirm="onCredConfirm"
     @cancel="onCredCancel"
   />

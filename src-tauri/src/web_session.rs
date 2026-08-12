@@ -202,17 +202,17 @@ fn pick_str(value: &Value, paths: &[&[&str]]) -> Option<String> {
     None
 }
 
-/// 使用已保存的 Web 会话 cookie 调用 Dashboard 的 billing/usage 接口。
-pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String> {
+/// 带 Dashboard 同源头信息请求 cloud.zed.dev 的 frontend 接口。
+fn fetch_frontend_json(session: &WebSession, path: &str) -> Result<Value, String> {
     if session.cookies.is_empty() {
         return Err("该账号还没有 Web 会话 cookie，请重新通过内置浏览器登录".into());
     }
     if !session_has_zed_cookie(session) {
-        return Err("未找到 zed.session，Web 额度接口无法鉴权，请重新登录".into());
+        return Err("未找到 zed.session，Web 接口无法鉴权，请重新登录".into());
     }
 
     let cookie = cookie_header(&session.cookies);
-    let url = format!("{ZED_CLOUD_BASE_URL}/frontend/billing/usage");
+    let url = format!("{ZED_CLOUD_BASE_URL}{path}");
     let response = ureq::get(&url)
         .set("Accept", "application/json")
         .set("Content-Type", "application/json")
@@ -224,20 +224,63 @@ pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String>
             "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) ZedAccountManager/0.1",
         )
         .call()
-        .map_err(|e| format!("请求 billing/usage 失败: {e}"))?;
+        .map_err(|e| format!("请求 {path} 失败: {e}"))?;
 
     let status = response.status();
     if status != 200 {
         let body = response.into_string().unwrap_or_default();
         return Err(format!(
-            "billing/usage 返回 HTTP {status}: {}",
+            "{path} 返回 HTTP {status}: {}",
             body.chars().take(200).collect::<String>()
         ));
     }
 
-    let raw: Value = response
+    response
         .into_json()
-        .map_err(|e| format!("解析 billing/usage 失败: {e}"))?;
+        .map_err(|e| format!("解析 {path} 失败: {e}"))
+}
+
+/// `/frontend/session` 返回的用户资料（邮箱、GitHub 用户名、套餐）。
+#[derive(Debug, Clone, Default)]
+pub struct SessionProfile {
+    pub email: Option<String>,
+    pub github_login: Option<String>,
+    pub username: Option<String>,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub plan_raw: Option<String>,
+}
+
+/// 使用已保存的 Web 会话 cookie 调用 Dashboard 的 session 接口拉取个人资料。
+pub fn fetch_session_profile(session: &WebSession) -> Result<SessionProfile, String> {
+    let raw = fetch_frontend_json(session, "/frontend/session")?;
+
+    // 优先取个人 organization 的 plan（is_personal = true）。
+    let plan_raw = raw
+        .get("organizations")
+        .and_then(Value::as_array)
+        .and_then(|orgs| {
+            orgs.iter()
+                .find(|o| o.get("is_personal").and_then(Value::as_bool).unwrap_or(false))
+                .or_else(|| orgs.first())
+        })
+        .and_then(|org| org.get("plan"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    Ok(SessionProfile {
+        email: pick_str(&raw, &[&["user", "email"]]),
+        github_login: pick_str(&raw, &[&["user", "github_login"]]),
+        username: pick_str(&raw, &[&["user", "username"]]),
+        name: pick_str(&raw, &[&["user", "name"]]),
+        avatar_url: pick_str(&raw, &[&["user", "avatar_url"]]),
+        plan_raw,
+    })
+}
+
+/// 使用已保存的 Web 会话 cookie 调用 Dashboard 的 billing/usage 接口。
+pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String> {
+    let raw = fetch_frontend_json(session, "/frontend/billing/usage")?;
 
     Ok(BillingUsage {
         plan_raw: pick_str(
@@ -253,6 +296,8 @@ pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String>
         token_spend_used_cents: pick_i64(
             &raw,
             &[
+                &["current_usage", "token_spend", "spend_in_cents"],
+                &["current_usage", "token_spend_in_cents"],
                 &["current_usage", "token_spend", "used"],
                 &["token_spend", "used"],
                 &["usage", "token_spend", "used"],
@@ -261,6 +306,7 @@ pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String>
         token_spend_limit_cents: pick_i64(
             &raw,
             &[
+                &["current_usage", "token_spend", "limit_in_cents"],
                 &["current_usage", "token_spend", "limit"],
                 &["token_spend", "limit"],
                 &["usage", "token_spend", "limit"],
@@ -269,6 +315,7 @@ pub fn fetch_billing_usage(session: &WebSession) -> Result<BillingUsage, String>
         token_spend_remaining_cents: pick_i64(
             &raw,
             &[
+                &["current_usage", "token_spend", "remaining_in_cents"],
                 &["current_usage", "token_spend", "remaining"],
                 &["token_spend", "remaining"],
                 &["usage", "token_spend", "remaining"],
