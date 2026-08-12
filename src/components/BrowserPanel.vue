@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { computeTotp } from "../totp";
+import { computeTotp } from "../utils/totp";
 import type { Credentials } from "./CredentialsDialog.vue";
 
 /**

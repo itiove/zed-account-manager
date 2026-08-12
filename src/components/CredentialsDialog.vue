@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
-import { looksLikeTotpSecret } from "../totp";
+import { looksLikeTotpSecret } from "../utils/totp";
 
 export interface Credentials {
   username: string;

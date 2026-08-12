@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
-import { api } from "./api";
+import { api } from "./services/api";
 import type { AccountSummary } from "./types";
 import AccountCard from "./components/AccountCard.vue";
 import BrowserPanel from "./components/BrowserPanel.vue";

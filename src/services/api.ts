@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AccountSummary, LoginPollResult, PendingLoginDto } from "./types";
+import type { AccountSummary, LoginPollResult, PendingLoginDto } from "../types";
 
 export interface PrepareBrowserDto {
   account_id: string;
