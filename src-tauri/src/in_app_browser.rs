@@ -25,6 +25,9 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// 后端强制使用该常量分割主 WebView 与内容 WebView，
 /// 前端传入的任何高度都会被忽略，避免旧代码/测量值造成遮挡。
 const CHROME_HEIGHT: f64 = 80.0;
+/// 底部凭据栏固定高度（逻辑像素），与前端 BrowserPanel.vue 的 CREDS_BAR_HEIGHT 保持一致。
+/// 仅当 browser_open 传入 bottom_bar=true 时预留。
+const CREDS_BAR_HEIGHT: f64 = 64.0;
 
 /// 兼容旧前端仍传 bounds 的情况（内容一律忽略）
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +46,8 @@ pub struct BrowserBounds {
 #[derive(Debug, Clone)]
 struct ActiveBrowser {
     profile_id: String,
+    /// 是否在窗口底部预留凭据栏区域
+    bottom_bar: bool,
 }
 
 static ACTIVE: std::sync::LazyLock<Mutex<Option<ActiveBrowser>>> =
@@ -92,16 +97,32 @@ fn window_logical_size(app: &AppHandle) -> Result<(f64, f64), String> {
     ))
 }
 
-/// 主 WebView 只占顶部工具栏（固定 CHROME_HEIGHT），内容 WebView 占下方剩余区域。
+/// 当前应预留的底部凭据栏高度
+fn bottom_bar_height() -> f64 {
+    let with_bar = ACTIVE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|a| a.bottom_bar))
+        .unwrap_or(false);
+    if with_bar {
+        CREDS_BAR_HEIGHT
+    } else {
+        0.0
+    }
+}
+
+/// 布局策略：主 WebView 铺满整个窗口（顶部渲染工具栏、底部渲染凭据栏），
+/// 内容 WebView 作为子视图叠在中间区域（子视图 z-order 恒在主 WebView 之上）。
 fn layout_split(app: &AppHandle) -> Result<(), String> {
     let (win_w, win_h) = window_logical_size(app)?;
-    let content_h = (win_h - CHROME_HEIGHT).max(120.0);
+    let bar_h = bottom_bar_height();
+    let content_h = (win_h - CHROME_HEIGHT - bar_h).max(120.0);
 
     if let Some(main) = app.get_webview(MAIN_WINDOW_LABEL) {
         main.set_position(LogicalPosition::new(0.0, 0.0))
             .map_err(|e| format!("主 WebView 定位失败: {e}"))?;
-        main.set_size(LogicalSize::new(win_w, CHROME_HEIGHT))
-            .map_err(|e| format!("主 WebView 缩到工具栏失败: {e}"))?;
+        main.set_size(LogicalSize::new(win_w, win_h))
+            .map_err(|e| format!("主 WebView 尺寸失败: {e}"))?;
     }
 
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
@@ -170,7 +191,8 @@ pub fn normalize_url(input: &str) -> Result<Url, String> {
     Url::parse(&format!("https://{trimmed}")).map_err(|e| format!("无效地址: {e}"))
 }
 
-/// 打开内嵌浏览器：收缩主 WebView + 挂载内容 WebView。
+/// 打开内嵌浏览器：主 WebView 铺满窗口（顶部工具栏 + 可选底部凭据栏），
+/// 内容 WebView 作为子视图叠在中间区域。
 /// `chrome_height` / `bounds` 参数仅为兼容旧前端保留，实际一律使用固定 CHROME_HEIGHT。
 #[tauri::command]
 pub fn browser_open(
@@ -179,12 +201,14 @@ pub fn browser_open(
     profile_id: String,
     #[allow(unused_variables)] chrome_height: Option<f64>,
     #[allow(unused_variables)] bounds: Option<BrowserBounds>,
+    bottom_bar: Option<bool>,
 ) -> Result<(), String> {
     let initial = normalize_url(&url)?;
     let profile_id = profile_id.trim().to_string();
     if profile_id.is_empty() {
         return Err("profile_id 不能为空".into());
     }
+    let bottom_bar = bottom_bar.unwrap_or(false);
 
     ensure_resize_hook(&app);
 
@@ -198,7 +222,10 @@ pub fn browser_open(
             existing
                 .navigate(initial)
                 .map_err(|e| format!("导航失败: {e}"))?;
-            *ACTIVE.lock().unwrap() = Some(ActiveBrowser { profile_id });
+            *ACTIVE.lock().unwrap() = Some(ActiveBrowser {
+                profile_id,
+                bottom_bar,
+            });
             layout_split(&app)?;
             let _ = existing.show();
             return Ok(());
@@ -207,15 +234,15 @@ pub fn browser_open(
         std::thread::sleep(std::time::Duration::from_millis(80));
     }
 
-    // 先缩主 WebView，再挂内容，避免闪一下全屏盖住
     *ACTIVE.lock().unwrap() = Some(ActiveBrowser {
         profile_id: profile_id.clone(),
+        bottom_bar,
     });
     layout_split(&app)?;
 
     let window = get_main_window(&app)?;
     let (win_w, win_h) = window_logical_size(&app)?;
-    let content_h = (win_h - CHROME_HEIGHT).max(120.0);
+    let content_h = (win_h - CHROME_HEIGHT - bottom_bar_height()).max(120.0);
 
     let store_id = web_session::profile_id_to_store_bytes(&profile_id);
     let profile_dir: PathBuf = web_session::profile_data_dir(&profile_id)?;

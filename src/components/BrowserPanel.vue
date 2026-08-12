@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { computeTotp } from "../totp";
+import type { Credentials } from "./CredentialsDialog.vue";
 
 /**
  * 工具栏固定高度（逻辑 px），与 Rust 端 CHROME_HEIGHT 常量一致。
@@ -17,6 +19,7 @@ const props = defineProps<{
   initialUrl: string;
   hint?: string;
   showSync?: boolean;
+  credentials?: Credentials | null;
 }>();
 
 const emit = defineEmits<{
@@ -28,6 +31,11 @@ const urlInput = ref("");
 const loading = ref(false);
 const syncing = ref(false);
 
+const hasCreds = computed(
+  () => !!props.credentials && !!props.credentials.username,
+);
+const hasSecret = computed(() => !!props.credentials?.secret);
+
 let unlisten: UnlistenFn | null = null;
 
 async function openBrowser() {
@@ -37,12 +45,66 @@ async function openBrowser() {
       url: props.initialUrl,
       profileId: props.profileId,
       chromeHeight: CHROME_HEIGHT,
+      bottomBar: hasCreds.value,
     });
     urlInput.value = props.initialUrl;
   } catch (e) {
     console.error(e);
   } finally {
     loading.value = false;
+  }
+}
+
+/* ── 底部凭据栏：复制 + 实时 2FA ─────────── */
+const totpCode = ref("------");
+const totpRemaining = ref(30);
+const totpPeriod = ref(30);
+const totpError = ref(false);
+const copied = ref<"username" | "password" | "totp" | null>(null);
+let totpTimer: ReturnType<typeof setInterval> | null = null;
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+const totpDisplay = computed(() => {
+  if (totpError.value) return "无效密钥";
+  const c = totpCode.value;
+  return c.length === 6 ? `${c.slice(0, 3)} ${c.slice(3)}` : c;
+});
+const ringDash = computed(() => {
+  const frac = totpRemaining.value / totpPeriod.value;
+  const circ = 2 * Math.PI * 9;
+  return `${circ * frac} ${circ}`;
+});
+
+async function refreshTotp() {
+  const secret = props.credentials?.secret;
+  if (!secret) return;
+  try {
+    const r = await computeTotp(secret);
+    totpCode.value = r.code;
+    totpRemaining.value = r.secondsRemaining;
+    totpPeriod.value = r.period;
+    totpError.value = false;
+  } catch {
+    totpError.value = true;
+    totpCode.value = "------";
+  }
+}
+
+async function copyField(field: "username" | "password" | "totp") {
+  const map = {
+    username: props.credentials?.username ?? "",
+    password: props.credentials?.password ?? "",
+    totp: totpCode.value,
+  };
+  const text = map[field];
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied.value = field;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied.value = null), 1400);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -143,6 +205,11 @@ onMounted(async () => {
     urlInput.value = ev.payload.url;
   });
 
+  if (hasSecret.value) {
+    await refreshTotp();
+    totpTimer = setInterval(refreshTotp, 1000);
+  }
+
   await openBrowser();
 });
 
@@ -150,6 +217,8 @@ onUnmounted(() => {
   document.body.style.overflow = "";
   window.removeEventListener("keydown", onKeydown);
   if (unlisten) void unlisten();
+  if (totpTimer) clearInterval(totpTimer);
+  if (copiedTimer) clearTimeout(copiedTimer);
   void closeBrowser();
 });
 
@@ -225,6 +294,79 @@ watch(
     <!-- 加载进度条：绝对定位覆盖在底边，不占布局高度 -->
     <div v-if="loading" class="loading-bar" />
   </header>
+
+  <!-- 底部凭据栏：登录页在中间原生 WebView，这里悬浮在窗口最底部 -->
+  <footer v-if="hasCreds" class="creds-bar">
+    <button
+      class="cred-cell"
+      type="button"
+      :class="{ copied: copied === 'username' }"
+      title="点击复制账号"
+      @click="copyField('username')"
+    >
+      <span class="cred-cell-label">
+        <Icon icon="lucide:user" style="font-size: 12px" />
+        账号
+      </span>
+      <span class="cred-cell-value">{{ credentials?.username }}</span>
+      <Icon
+        :icon="copied === 'username' ? 'lucide:check' : 'lucide:copy'"
+        class="cred-cell-copy"
+        style="font-size: 13px"
+      />
+    </button>
+
+    <button
+      class="cred-cell"
+      type="button"
+      :class="{ copied: copied === 'password' }"
+      title="点击复制密码"
+      @click="copyField('password')"
+    >
+      <span class="cred-cell-label">
+        <Icon icon="lucide:lock" style="font-size: 12px" />
+        密码
+      </span>
+      <span class="cred-cell-value">••••••••</span>
+      <Icon
+        :icon="copied === 'password' ? 'lucide:check' : 'lucide:copy'"
+        class="cred-cell-copy"
+        style="font-size: 13px"
+      />
+    </button>
+
+    <button
+      v-if="hasSecret"
+      class="cred-cell totp"
+      type="button"
+      :class="{ copied: copied === 'totp', error: totpError }"
+      title="点击复制动态验证码"
+      @click="copyField('totp')"
+    >
+      <span class="cred-cell-label">
+        <Icon icon="lucide:shield-check" style="font-size: 12px" />
+        2FA 验证码
+      </span>
+      <span class="cred-cell-value totp-code">{{ totpDisplay }}</span>
+      <svg v-if="!totpError" class="totp-ring" width="22" height="22" viewBox="0 0 22 22">
+        <circle class="totp-ring-bg" cx="11" cy="11" r="9" />
+        <circle
+          class="totp-ring-fg"
+          cx="11"
+          cy="11"
+          r="9"
+          :stroke-dasharray="ringDash"
+        />
+        <text x="11" y="11" class="totp-ring-num">{{ totpRemaining }}</text>
+      </svg>
+      <Icon
+        v-else
+        icon="lucide:alert-triangle"
+        class="cred-cell-copy"
+        style="font-size: 13px"
+      />
+    </button>
+  </footer>
 </template>
 
 <style scoped>
@@ -417,5 +559,131 @@ watch(
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ── 底部凭据栏 ─────────────────────── */
+.creds-bar {
+  --creds-bar-height: 64px;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--creds-bar-height);
+  box-sizing: border-box;
+  overflow: hidden;
+  z-index: 10;
+
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: #fafafa;
+  border-top: 1px solid #ececf0;
+}
+
+.cred-cell {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  position: relative;
+  padding: 0 34px 0 12px;
+  border-radius: 10px;
+  border: 1px solid #e4e4e7;
+  background: #ffffff;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cred-cell:hover {
+  border-color: #d4d4d8;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.cred-cell:active {
+  transform: scale(0.99);
+}
+
+.cred-cell.copied {
+  border-color: #16a34a;
+  background: #f0fdf4;
+}
+
+.cred-cell.totp.error {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.cred-cell-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #a1a1aa;
+  white-space: nowrap;
+}
+
+.cred-cell-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #18181b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cred-cell-value.totp-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 1px;
+  font-size: 15px;
+}
+
+.cred-cell-copy {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #a1a1aa;
+}
+
+.cred-cell.copied .cred-cell-copy {
+  color: #16a34a;
+}
+
+/* TOTP 倒计时环 */
+.totp-ring {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.totp-ring-bg {
+  fill: none;
+  stroke: #e4e4e7;
+  stroke-width: 2.5;
+}
+
+.totp-ring-fg {
+  fill: none;
+  stroke: #18181b;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 11px 11px;
+  transition: stroke-dasharray 0.95s linear;
+}
+
+.totp-ring-num {
+  font-size: 8px;
+  font-weight: 700;
+  fill: #52525b;
+  text-anchor: middle;
+  dominant-baseline: central;
 }
 </style>

@@ -13,11 +13,9 @@
     "windows": [
       {
         "title": "Zed Account Manager",
-        "width": 840,
-        "height": 860,
-        "minWidth": 600,
-        "minHeight": 680,
-        "resizable": true,
+        "width": 600,
+        "height": 800,
+        "resizable": false,
         "center": true
       }
     ],

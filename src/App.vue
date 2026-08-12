@@ -5,6 +5,7 @@ import { api } from "./api";
 import type { AccountSummary } from "./types";
 import AccountCard from "./components/AccountCard.vue";
 import BrowserPanel from "./components/BrowserPanel.vue";
+import CredentialsDialog, { type Credentials } from "./components/CredentialsDialog.vue";
 
 const accounts = ref<AccountSummary[]>([]);
 const busy = ref(false);
@@ -28,15 +29,17 @@ const browserMode = ref<"login" | "session">("login");
 const envLoading = ref(false);
 const envLoadingText = ref("");
 
+/** 添加账号凭据对话框 */
+const credDialogOpen = ref(false);
+/** 传给内嵌浏览器底部栏的凭据（账号/密码/2FA） */
+const browserCredentials = ref<Credentials | null>(null);
+
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let activeLoginId: string | null = null;
 
 const currentAccount = computed(() => accounts.value.find((a) => a.is_current) ?? null);
 const accountCount = computed(() => accounts.value.length);
-const sessionReadyCount = computed(
-  () => accounts.value.filter((a) => a.has_web_session).length,
-);
 
 function showToast(text: string, isError = false) {
   toast.value = { text, isError };
@@ -68,6 +71,7 @@ function stopPolling() {
 async function closeInAppBrowser() {
   browserOpen.value = false;
   browserAccountId.value = null;
+  browserCredentials.value = null;
   try {
     await api.browserClose();
   } catch {
@@ -213,18 +217,21 @@ async function handleBrowserSync() {
   }
 }
 
-async function handleLogout() {
-  if (!confirm("确定退出当前 Zed 登录态？会清空 Keychain 并重启 Zed。")) return;
-  busy.value = true;
-  try {
-    await api.logoutCurrent();
-    await loadAccounts();
-    showToast("已退出登录");
-  } catch (e) {
-    showToast(String(e), true);
-  } finally {
-    busy.value = false;
-  }
+/** 点击「添加账号」：先弹凭据对话框 */
+function openAddAccountDialog() {
+  browserCredentials.value = null;
+  credDialogOpen.value = true;
+}
+
+function onCredCancel() {
+  credDialogOpen.value = false;
+}
+
+/** 凭据填写完成：记录凭据并进入登录流程 */
+function onCredConfirm(creds: Credentials) {
+  credDialogOpen.value = false;
+  browserCredentials.value = creds;
+  void handleAddAccount();
 }
 
 async function handleAddAccount() {
@@ -328,18 +335,33 @@ onUnmounted(() => {
               <Icon icon="lucide:users" style="font-size: 12px" />
               {{ accountCount }} 个账号
             </span>
-            <span class="stat-chip" v-if="accountCount">
-              <span class="stat-chip-dot"></span>
-              {{ sessionReadyCount }} Web 会话就绪
-            </span>
           </div>
         </div>
       </div>
       <div class="toolbar">
+        <div
+          class="active-pill"
+          v-if="currentAccount"
+          :title="`当前生效账号 · ${currentAccount.plan_raw ?? '未知套餐'}`"
+        >
+          <span class="pulse-dot" />
+          <span class="active-name">
+            {{
+              currentAccount.display_name ||
+              currentAccount.github_login ||
+              currentAccount.id
+            }}
+          </span>
+        </div>
+        <div class="active-pill offline" v-else title="未写入 Keychain / 未标记当前账号">
+          <span class="pulse-dot offline" />
+          <span class="active-name">未生效</span>
+        </div>
+
         <button
           class="primary"
-          @click="handleAddAccount"
-          :disabled="busy || browserOpen || envLoading"
+          @click="openAddAccountDialog"
+          :disabled="busy || browserOpen || envLoading || credDialogOpen"
           title="添加新 Zed 账号"
         >
           <Icon
@@ -351,7 +373,7 @@ onUnmounted(() => {
         </button>
 
         <button
-          class="outline"
+          class="outline icon-btn"
           @click="handleRefreshAll"
           :disabled="busy || !accountCount || browserOpen"
           title="刷新所有账号的额度"
@@ -359,67 +381,29 @@ onUnmounted(() => {
           <Icon
             icon="lucide:rotate-cw"
             :class="{ 'icon-spin': busy && actionTargetId === 'all' }"
-            style="font-size: 13px"
+            style="font-size: 14px"
           />
-          刷新
-        </button>
-
-        <button
-          class="ghost"
-          @click="handleLogout"
-          :disabled="busy || browserOpen"
-          title="退出当前登录"
-        >
-          <Icon icon="lucide:log-out" style="font-size: 13px" />
-          退出
         </button>
       </div>
     </header>
 
-    <!-- Active Account Status Highlight Banner -->
-    <section class="status-card" v-if="currentAccount">
-      <div class="status-main">
-        <div class="pulse-dot" />
-        <div class="status-details">
-          <div class="status-label">当前生效账号</div>
-          <div class="status-name">
-            {{
-              currentAccount.display_name ||
-              currentAccount.github_login ||
-              currentAccount.id
-            }}
-          </div>
+    <!-- Toast 悬浮通知：固定顶部居中，不占布局 -->
+    <Transition name="toast">
+      <div class="toast-container" :class="{ error: toast?.isError }" v-if="toast">
+        <div class="toast-content">
+          <Icon
+            class="toast-icon"
+            :class="toast.isError ? 'is-error' : 'is-ok'"
+            :icon="toast.isError ? 'lucide:alert-triangle' : 'lucide:check-circle-2'"
+            style="font-size: 16px; flex-shrink: 0"
+          />
+          <span>{{ toast.text }}</span>
         </div>
+        <button class="toast-close" @click="dismissToast" title="关闭通知">
+          <Icon icon="lucide:x" style="font-size: 14px" />
+        </button>
       </div>
-      <div class="plan-chip">
-        <Icon icon="lucide:sparkles" style="font-size: 12px" />
-        {{ currentAccount.plan_raw ?? "未知套餐" }}
-      </div>
-    </section>
-
-    <section class="status-card empty" v-else>
-      <div class="status-main">
-        <div class="pulse-dot offline" />
-        <div class="status-details">
-          <div class="status-label">当前状态</div>
-          <div class="status-name muted">未写入 Keychain / 未标记当前账号</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Toast Notification Banner -->
-    <div class="toast-container" :class="{ error: toast?.isError }" v-if="toast">
-      <div class="toast-content">
-        <Icon
-          :icon="toast.isError ? 'lucide:alert-triangle' : 'lucide:check-circle-2'"
-          style="font-size: 16px; flex-shrink: 0"
-        />
-        <span>{{ toast.text }}</span>
-      </div>
-      <button class="toast-close" @click="dismissToast" title="关闭通知">
-        <Icon icon="lucide:x" style="font-size: 14px" />
-      </button>
-    </div>
+    </Transition>
 
     <!-- Account Cards List -->
     <main class="account-list">
@@ -457,6 +441,7 @@ onUnmounted(() => {
         :initial-url="browserUrl"
         :hint="browserHint"
         :show-sync="browserShowSync"
+        :credentials="browserCredentials"
         @close="handleBrowserClose"
         @sync="handleBrowserSync"
       />
@@ -471,4 +456,11 @@ onUnmounted(() => {
       <div class="env-sub">正在准备独立浏览器会话，马上就好</div>
     </div>
   </div>
+
+  <!-- 添加账号凭据对话框 -->
+  <CredentialsDialog
+    v-if="credDialogOpen"
+    @confirm="onCredConfirm"
+    @cancel="onCredCancel"
+  />
 </template>
