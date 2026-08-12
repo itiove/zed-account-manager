@@ -27,7 +27,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const CHROME_HEIGHT: f64 = 80.0;
 /// 底部凭据栏固定高度（逻辑像素），与前端 BrowserPanel.vue 的 CREDS_BAR_HEIGHT 保持一致。
 /// 仅当 browser_open 传入 bottom_bar=true 时预留。
-const CREDS_BAR_HEIGHT: f64 = 64.0;
+const CREDS_BAR_HEIGHT: f64 = 54.0;
 
 /// 兼容旧前端仍传 bounds 的情况（内容一律忽略）
 #[derive(Debug, Clone, Deserialize)]

@@ -298,7 +298,7 @@ watch(
   <!-- 底部凭据栏：登录页在中间原生 WebView，这里悬浮在窗口最底部 -->
   <footer v-if="hasCreds" class="creds-bar">
     <button
-      class="cred-cell"
+      class="cred-cell username"
       type="button"
       :class="{ copied: copied === 'username' }"
       title="点击复制账号"
@@ -317,7 +317,7 @@ watch(
     </button>
 
     <button
-      class="cred-cell"
+      class="cred-cell password"
       type="button"
       :class="{ copied: copied === 'password' }"
       title="点击复制密码"
@@ -327,7 +327,7 @@ watch(
         <Icon icon="lucide:lock" style="font-size: 12px" />
         密码
       </span>
-      <span class="cred-cell-value">••••••••</span>
+      <span class="cred-cell-value mono">{{ credentials?.password }}</span>
       <Icon
         :icon="copied === 'password' ? 'lucide:check' : 'lucide:copy'"
         class="cred-cell-copy"
@@ -563,7 +563,7 @@ watch(
 
 /* ── 底部凭据栏 ─────────────────────── */
 .creds-bar {
-  --creds-bar-height: 64px;
+  --creds-bar-height: 54px;
   position: fixed;
   bottom: 0;
   left: 0;
@@ -584,7 +584,7 @@ watch(
 .cred-cell {
   flex: 1;
   min-width: 0;
-  height: 44px;
+  height: 40px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -618,6 +618,21 @@ watch(
   background: #fef2f2;
 }
 
+/* 宽度分配：密码与 2FA 定宽（内容长度基本固定），剩余空间全部给账号 */
+.cred-cell.username {
+  flex: 1 1 0;
+}
+
+.cred-cell.password {
+  flex: 0 0 auto;
+  width: 158px;
+}
+
+.cred-cell.totp {
+  flex: 0 0 auto;
+  width: 138px;
+}
+
 .cred-cell-label {
   display: inline-flex;
   align-items: center;
@@ -635,6 +650,12 @@ watch(
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cred-cell-value.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  letter-spacing: 0.2px;
 }
 
 .cred-cell-value.totp-code {
